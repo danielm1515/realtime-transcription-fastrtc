@@ -30,10 +30,11 @@ logger = logging.getLogger(__name__)
 UI_MODE = os.getenv("UI_MODE", "fastapi").lower() # gradio | fastapi
 UI_TYPE = os.getenv("UI_TYPE", "base").lower() # base | screen
 APP_MODE = os.getenv("APP_MODE", "local").lower() # local | deployed
-TURN_PROVIDER = os.getenv("TURN_PROVIDER", "hf-cloudflare") # hf-cloudflare | cloudflare | twilio
+TURN_PROVIDER = os.getenv("TURN_PROVIDER", "cloudflare") # hf-cloudflare | cloudflare | twilio
 
 MODEL_ID = os.getenv("MODEL_ID", "openai/whisper-large-v3-turbo")
 LANGUAGE = os.getenv("LANGUAGE", "english")
+ENABLE_CONSOLE_PRINT = os.getenv("ENABLE_CONSOLE_PRINT", "true").lower() == "true"
 
 logger.info(f"""
     --------------------------------------
@@ -44,6 +45,7 @@ logger.info(f"""
     - TURN_PROVIDER: {TURN_PROVIDER}
     - MODEL_ID: {MODEL_ID}
     - LANGUAGE: {LANGUAGE}
+    - ENABLE_CONSOLE_PRINT: {ENABLE_CONSOLE_PRINT}
     --------------------------------------
 """)
 
@@ -51,7 +53,8 @@ transcribe_pipeline = initialize_whisper_model(
     model_id=MODEL_ID,
     try_compile=True, # Set to False to disable trying to compile the model
     try_use_flash_attention=True, # Set to False to disable trying to use flash attention
-    device=get_device(force_cpu=False) # Set to False to use GPU if available
+    device=get_device(force_cpu=False), # Set to False to use GPU if available
+    enable_console_print=ENABLE_CONSOLE_PRINT
 )
 
 async def transcribe(audio: tuple[int, np.ndarray]):

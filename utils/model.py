@@ -16,7 +16,8 @@ def initialize_whisper_model(
         model_id: str, 
         try_compile: bool, 
         try_use_flash_attention: bool, 
-        device: str
+        device: str,
+        enable_console_print: bool = True
     ) -> pipeline:
     """Initialize Whisper model with optimal configuration.
     
@@ -25,6 +26,7 @@ def initialize_whisper_model(
         try_compile: Whether to try to compile the model.
         try_use_flash_attention: Whether to try to use flash attention.
         device: The device to load the model on.
+        enable_console_print: Whether to enable live transcription printing to console.
 
     Returns:
         pipeline: The transcribe pipeline.
@@ -52,6 +54,11 @@ def initialize_whisper_model(
     compiled = compile_model_if_possible(transcribe_pipeline, try_compile_model)
     warmup_model(transcribe_pipeline, np_dtype, audio_length=16000)
     
+    # Wrap with console printing if enabled
+    if enable_console_print:
+        transcribe_pipeline = create_live_transcription_wrapper(transcribe_pipeline, enable_console_print)
+        logger.info("Live console transcription printing enabled")
+    
     logger.info(f"Model initialized successfully")
     logger.info(f"""
         --------------------------------------
@@ -61,6 +68,7 @@ def initialize_whisper_model(
         - Numpy dtype: {np_dtype}
         - Flash attention: {use_flash_attention}
         - Compiled: {compiled}
+        - Console printing: {enable_console_print}
         --------------------------------------
     """)
     return transcribe_pipeline
@@ -190,3 +198,35 @@ def compile_model_if_possible(transcribe_pipeline, try_compile: bool):
     except Exception as e:
         logger.error(f"Model compilation failed: {e}", exc_info=True)
         return False
+
+def create_live_transcription_wrapper(transcribe_pipeline, enable_console_print: bool = True):
+    """Create a wrapper around the transcription pipeline that prints results to console.
+    
+    Args:
+        transcribe_pipeline: The original transcription pipeline
+        enable_console_print: Whether to print transcriptions to console
+        
+    Returns:
+        A wrapper function that behaves like the original pipeline but prints results
+    """
+    def transcription_wrapper(*args, **kwargs):
+        # Call the original pipeline
+        result = transcribe_pipeline(*args, **kwargs)
+        
+        # Print to console if enabled
+        if enable_console_print and isinstance(result, dict) and "text" in result:
+            transcript_text = result["text"].strip()
+            if transcript_text:  # Only print if there's actual text
+                print(f"🎤 LIVE TRANSCRIPTION: {transcript_text}")
+        
+        return result
+    
+    # Copy attributes from original pipeline to wrapper
+    for attr_name in dir(transcribe_pipeline):
+        if not attr_name.startswith('__') and attr_name != '__call__':
+            try:
+                setattr(transcription_wrapper, attr_name, getattr(transcribe_pipeline, attr_name))
+            except (AttributeError, TypeError):
+                pass  # Skip attributes that can't be set
+    
+    return transcription_wrapper
