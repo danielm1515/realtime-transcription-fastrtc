@@ -156,7 +156,7 @@ async def process_with_llm(transcript: str) -> AsyncGenerator[str, None]:
             {"role": "system", "content": system_context},
             {"role": "user", "content": transcript}
         ]):
-            if hasattr(chunk, 'content') and chunk.content:
+            if hasattr(chunk, 'content') and chunk.content and chunk.content.strip():
                 full_response += chunk.content
                 yield chunk.content
         
@@ -277,8 +277,10 @@ def _(webrtc_id: str):
             if webrtc_id in llm_streams:
                 llm_stream = llm_streams[webrtc_id]
                 async for chunk in llm_stream:
-                    logger.debug(f"Sending LLM chunk for {webrtc_id}: {chunk[:50]}...")
-                    yield f"event: llm-output\ndata: {chunk}\n\n"
+                    # Only send non-empty chunks
+                    if chunk and chunk.strip():
+                        logger.debug(f"Sending LLM chunk for {webrtc_id}: {chunk[:50]}...")
+                        yield f"event: llm-output\ndata: {chunk}\n\n"
                 
                 # Clean up after streaming is complete
                 del llm_streams[webrtc_id]

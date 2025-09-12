@@ -357,12 +357,18 @@ document.addEventListener('DOMContentLoaded', function() {
         
         llmEventSource.addEventListener("llm-output", (event) => {
             console.log("Received LLM chunk:", event.data);
-            appendLLMResponse(event.data);
+            // Only process non-empty, non-undefined chunks
+            if (event.data && event.data.trim() !== "" && event.data !== "undefined") {
+                appendLLMResponse(event.data);
+            }
         });
         
         llmEventSource.addEventListener("error", (event) => {
             console.error("LLM processing error:", event.data);
-            showError("LLM processing error: " + event.data);
+            // Only show error if it's not undefined/empty
+            if (event.data && event.data.trim() !== "" && event.data !== "undefined") {
+                showError("LLM processing error: " + event.data);
+            }
         });
     }
 
