@@ -347,6 +347,12 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Start LLM response stream
     function startLLMResponseStream() {
+        // Don't create a new stream if one is already active
+        if (llmEventSource && llmEventSource.readyState !== EventSource.CLOSED) {
+            console.log("LLM EventSource already active, skipping...");
+            return;
+        }
+        
         if (llmEventSource) {
             llmEventSource.close();
         }
@@ -356,6 +362,11 @@ document.addEventListener('DOMContentLoaded', function() {
         
         llmEventSource.onerror = (event) => {
             console.error("LLM EventSource error:", event);
+            // Close on error to prevent continuous reconnection
+            if (llmEventSource) {
+                llmEventSource.close();
+                llmEventSource = null;
+            }
         };
         
         llmEventSource.addEventListener("llm-output", (event) => {
@@ -381,16 +392,20 @@ document.addEventListener('DOMContentLoaded', function() {
                 playTTSAudio();
             }, 500);
             // Close the event source to stop polling
-            llmEventSource.close();
-            llmEventSource = null;
+            if (llmEventSource) {
+                llmEventSource.close();
+                llmEventSource = null;
+            }
         });
         
         // Handle no-stream event (when polling but no stream available)
         llmEventSource.addEventListener("no-stream", (event) => {
             console.log("No LLM stream available, closing connection");
             // Close the event source to stop continuous polling
-            llmEventSource.close();
-            llmEventSource = null;
+            if (llmEventSource) {
+                llmEventSource.close();
+                llmEventSource = null;
+            }
         });
         
         llmEventSource.addEventListener("error", (event) => {
@@ -398,6 +413,11 @@ document.addEventListener('DOMContentLoaded', function() {
             // Only show error if it's not undefined/empty
             if (event.data && event.data.trim() !== "" && event.data !== "undefined") {
                 showError("LLM processing error: " + event.data);
+            }
+            // Close on error
+            if (llmEventSource) {
+                llmEventSource.close();
+                llmEventSource = null;
             }
         });
     }
@@ -435,13 +455,20 @@ document.addEventListener('DOMContentLoaded', function() {
                     });
                 };
                 
+                currentAudio.onplay = () => {
+                    console.log("TTS audio started playing");
+                    startTTSVisualization();
+                };
+                
                 currentAudio.onended = () => {
                     console.log("TTS audio playback finished");
+                    stopTTSVisualization();
                     URL.revokeObjectURL(audioUrl); // Clean up
                 };
                 
                 currentAudio.onerror = (e) => {
                     console.error("TTS audio error:", e);
+                    stopTTSVisualization();
                     showError("Error playing TTS audio");
                     URL.revokeObjectURL(audioUrl); // Clean up
                 };
@@ -453,6 +480,121 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         } catch (error) {
             console.error("Error in TTS audio playback:", error);
+        }
+    }
+
+    // TTS Audio Visualization
+    let ttsVisualizationFrame;
+    let ttsAudioContext;
+    let ttsAnalyser;
+    let ttsAudioSource;
+    
+    function startTTSVisualization() {
+        if (!currentAudio) return;
+        
+        try {
+            // Create audio context for TTS audio if not exists
+            if (!ttsAudioContext) {
+                ttsAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+            } else if (ttsAudioContext.state === 'suspended') {
+                ttsAudioContext.resume();
+            }
+            
+            // Create analyzer and source for TTS audio
+            ttsAnalyser = ttsAudioContext.createAnalyser();
+            ttsAudioSource = ttsAudioContext.createMediaElementSource(currentAudio);
+            ttsAudioSource.connect(ttsAnalyser);
+            ttsAnalyser.connect(ttsAudioContext.destination); // Connect to speakers
+            ttsAnalyser.fftSize = 64;
+            
+            const dataArray = new Uint8Array(ttsAnalyser.frequencyBinCount);
+            
+            function updateTTSVisualization() {
+                if (!currentAudio || currentAudio.paused || currentAudio.ended) {
+                    stopTTSVisualization();
+                    return;
+                }
+                
+                ttsAnalyser.getByteFrequencyData(dataArray);
+                const average = Array.from(dataArray).reduce((a, b) => a + b, 0) / dataArray.length;
+                const audioLevel = average / 255;
+                
+                // Update pulse based on TTS audio level
+                const pulse = document.querySelector('.pulse');
+                const pulseRings = document.querySelectorAll('.pulse-ring');
+                
+                if (pulse) {
+                    // Scale based on audio level (1.0 to 1.3 for TTS)
+                    const scale = 1 + (audioLevel * 0.3);
+                    pulse.style.setProperty('--audio-level', scale);
+                    
+                    // Add TTS playing class
+                    pulse.classList.add('tts-playing');
+                    
+                    // Dynamic color animation based on audio level
+                    if (audioLevel > 0.2) {
+                        pulse.style.setProperty('--color-speed', '0.8s'); // Fast when loud
+                    } else if (audioLevel > 0.1) {
+                        pulse.style.setProperty('--color-speed', '1.5s'); // Medium when speaking
+                    } else {
+                        pulse.style.setProperty('--color-speed', '3s'); // Slow when quiet
+                    }
+                }
+                
+                // Animate rings based on TTS audio
+                if (pulseRings) {
+                    pulseRings.forEach((ring, index) => {
+                        if (audioLevel > 0.05) {
+                            ring.classList.add('active');
+                            const speed = Math.max(2, 4 - audioLevel * 3);
+                            ring.style.animationDuration = `${speed}s`;
+                        } else {
+                            ring.classList.remove('active');
+                            ring.style.animationDuration = '4s';
+                        }
+                    });
+                }
+                
+                ttsVisualizationFrame = requestAnimationFrame(updateTTSVisualization);
+            }
+            
+            updateTTSVisualization();
+        } catch (error) {
+            console.error("Error setting up TTS visualization:", error);
+        }
+    }
+    
+    function stopTTSVisualization() {
+        if (ttsVisualizationFrame) {
+            cancelAnimationFrame(ttsVisualizationFrame);
+            ttsVisualizationFrame = null;
+        }
+        
+        // Reset pulse appearance
+        const pulse = document.querySelector('.pulse');
+        const pulseRings = document.querySelectorAll('.pulse-ring');
+        
+        if (pulse) {
+            pulse.classList.remove('tts-playing');
+            pulse.style.setProperty('--audio-level', '1');
+            pulse.style.setProperty('--color-speed', '8s'); // Return to idle speed
+        }
+        
+        if (pulseRings) {
+            pulseRings.forEach(ring => {
+                ring.classList.remove('active');
+                ring.style.animationDuration = '3s';
+            });
+        }
+        
+        // Clean up audio context resources
+        if (ttsAudioSource) {
+            ttsAudioSource.disconnect();
+            ttsAudioSource = null;
+        }
+        if (ttsAnalyser) {
+            ttsAnalyser.disconnect();
+            ttsAnalyser = null;
         }
     }
 
@@ -617,6 +759,9 @@ document.addEventListener('DOMContentLoaded', function() {
             currentAudio.pause();
             currentAudio.currentTime = 0;
         }
+        
+        // Stop TTS visualization
+        stopTTSVisualization();
         
         // Clear TTS timer
         if (ttsPlaybackTimer) {

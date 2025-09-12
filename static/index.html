@@ -147,8 +147,8 @@
         }
 
         .toast.warning {
-            background-color: #ffd700;
-            color: black;
+            background-color: #34d399;
+            color: white;
         }
 
         /* Add styles for audio visualization */
@@ -368,6 +368,14 @@
                 0 0 60px rgba(117, 190, 229, 0.2);
         }
 
+        /* Different glow effect when TTS is playing */
+        .pulse.tts-playing {
+            box-shadow: 
+                0 0 25px rgba(16, 185, 129, 0.5),
+                0 0 45px rgba(5, 150, 105, 0.4),
+                0 0 65px rgba(34, 197, 94, 0.3);
+        }
+
         /* Simple random color animation for idle state */
         @keyframes idle-color-shift {
             0% { filter: hue-rotate(0deg); }
@@ -423,7 +431,7 @@
         }
 
         /* Snow Effect */
-        .snow {
+        /* .snow {
             position: fixed;
             top: 0;
             left: 0;
@@ -432,7 +440,7 @@
             pointer-events: none;
             z-index: 1000;
             overflow: hidden;
-        }
+        } */
 
         .flake {
             position: absolute;
