@@ -8,6 +8,7 @@ document.addEventListener('DOMContentLoaded', function() {
     let animationFrame;      // Reference to the animation frame for audio visualization
     let isRecording = false; // Tracks whether we're currently recording or not
     let eventSource;         // Object that receives transcription results from the server
+    let llmEventSource;      // Object that receives LLM responses from the server
 
     // DOM element references
     const startButton = document.getElementById('start-button');    // The button to start/stop recording
@@ -21,6 +22,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // Variables for managing the transcript display
     let currentParagraph = null;    // Reference to the current paragraph being updated
     let lastUpdateTime = Date.now(); // Timestamp of when we last updated the transcript
+    let currentLLMParagraph = null;  // Reference to the current LLM response paragraph
 
     // Show error messages to the user in a toast notification
     function showError(message) {
@@ -323,6 +325,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 console.log("Received transcript chunk:", event.data);
                 // Add text to display
                 appendTranscript(event.data);
+                
+                // Start LLM response stream if transcript is not empty
+                if (event.data.trim()) {
+                    startLLMResponseStream();
+                }
             });
             
             console.log('WebRTC setup complete, waiting for connection...');
@@ -333,6 +340,55 @@ document.addEventListener('DOMContentLoaded', function() {
             stop();
             startButton.textContent = 'Start Recording';
         }
+    }
+
+    // Start LLM response stream
+    function startLLMResponseStream() {
+        if (llmEventSource) {
+            llmEventSource.close();
+        }
+        
+        console.log('Creating LLM response stream...');
+        llmEventSource = new EventSource('/llm-response?webrtc_id=' + webrtc_id);
+        
+        llmEventSource.onerror = (event) => {
+            console.error("LLM EventSource error:", event);
+        };
+        
+        llmEventSource.addEventListener("llm-output", (event) => {
+            console.log("Received LLM chunk:", event.data);
+            appendLLMResponse(event.data);
+        });
+        
+        llmEventSource.addEventListener("error", (event) => {
+            console.error("LLM processing error:", event.data);
+            showError("LLM processing error: " + event.data);
+        });
+    }
+
+    // Add LLM response to display
+    function appendLLMResponse(text) {
+        if (!text.trim()) return;
+        
+        // Create new LLM response paragraph if none exists
+        if (!currentLLMParagraph) {
+            currentLLMParagraph = document.createElement('p');
+            currentLLMParagraph.classList.add('llm-response');
+            currentLLMParagraph.style.backgroundColor = 'rgba(16, 185, 129, 0.1)';
+            currentLLMParagraph.style.borderLeft = '3px solid #10b981';
+            currentLLMParagraph.style.paddingLeft = '12px';
+            currentLLMParagraph.style.fontStyle = 'italic';
+            transcriptDiv.appendChild(currentLLMParagraph);
+            currentLLMParagraph.textContent = '';
+        }
+        
+        // Append new text to current LLM paragraph
+        currentLLMParagraph.textContent += text;
+        
+        // Auto-scroll to show new content
+        requestAnimationFrame(() => {
+            transcriptDiv.scrollTop = transcriptDiv.scrollHeight;
+        });
     }
 
     function appendTranscriptSimple(text) {
@@ -347,6 +403,9 @@ document.addEventListener('DOMContentLoaded', function() {
         // Clean up text
         const formattedText = text.trim();
         if (!formattedText) return;
+        
+        // Reset LLM paragraph for new transcript
+        currentLLMParagraph = null;
         
         const now = Date.now();
         const timeSinceLastUpdate = now - lastUpdateTime;
@@ -457,6 +516,12 @@ document.addEventListener('DOMContentLoaded', function() {
             eventSource = null;
         }
         
+        // Close LLM response connection
+        if (llmEventSource) {
+            llmEventSource.close();
+            llmEventSource = null;
+        }
+        
         // Reset audio level
         audioLevel = 0;
         // Update button display
@@ -474,6 +539,9 @@ document.addEventListener('DOMContentLoaded', function() {
                 currentParagraph = null;
             }
         }
+        
+        // Reset LLM paragraph
+        currentLLMParagraph = null;
         
         // Reset timestamp
         lastUpdateTime = Date.now();

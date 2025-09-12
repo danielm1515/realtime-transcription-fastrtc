@@ -1,6 +1,9 @@
 import os
 import logging
 import json
+import asyncio
+import uuid
+from typing import AsyncGenerator
 
 import gradio as gr
 import numpy as np
@@ -8,6 +11,8 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import StreamingResponse, HTMLResponse
+from langchain_ollama import ChatOllama
+import chromadb
 from fastrtc import (
     AdditionalOutputs,
     ReplyOnPause,
@@ -34,6 +39,8 @@ TURN_PROVIDER = os.getenv("TURN_PROVIDER", "hf-cloudflare") # hf-cloudflare | cl
 
 MODEL_ID = os.getenv("MODEL_ID", "openai/whisper-large-v3-turbo")
 LANGUAGE = os.getenv("LANGUAGE", "english")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:20b")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
 logger.info(f"""
     --------------------------------------
@@ -44,15 +51,125 @@ logger.info(f"""
     - TURN_PROVIDER: {TURN_PROVIDER}
     - MODEL_ID: {MODEL_ID}
     - LANGUAGE: {LANGUAGE}
+    - OLLAMA_MODEL: {OLLAMA_MODEL}
+    - OLLAMA_BASE_URL: {OLLAMA_BASE_URL}
     --------------------------------------
 """)
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Local long-term memory (ChromaDB)
+# ──────────────────────────────────────────────────────────────────────────────
+class LocalMemory:
+    def __init__(self, persist_dir="memory_store"):
+        self.client = chromadb.PersistentClient(path=persist_dir)
+        self.collection = self.client.get_or_create_collection("long_term_memory")
+
+    def add(self, text: str, user_id: str = "default"):
+        doc_id = f"{user_id}_{uuid.uuid4()}"
+        self.collection.add(
+            documents=[text],
+            metadatas=[{"user": user_id}],
+            ids=[doc_id]
+        )
+
+    def search(self, query: str, user_id: str = "default", limit: int = 5):
+        results = self.collection.query(
+            query_texts=[query],
+            n_results=limit,
+            where={"user": user_id}
+        )
+        docs = results.get("documents", [])
+        return [d for sublist in docs for d in sublist]  # flatten
+
+# Initialize models and memory
 transcribe_pipeline = initialize_whisper_model(
     model_id=MODEL_ID,
     try_compile=True, # Set to False to disable trying to compile the model
     try_use_flash_attention=True, # Set to False to disable trying to use flash attention
     device=get_device(force_cpu=False) # Set to False to use GPU if available
 )
+
+# Initialize Ollama LLM
+llm = ChatOllama(
+    model=OLLAMA_MODEL,
+    base_url=OLLAMA_BASE_URL,
+    temperature=0.7
+)
+
+# Initialize memory
+USER_ID = "daniel"
+memory = LocalMemory()
+
+# Persistent user profile (facts)
+USER_FACTS = [
+    "The user's name is Daniel Mamre.",
+    "Daniel is a senior full-stack engineer and ML enthusiast.",
+    "He works on the TIBA SPARK ecosystem.",
+    "He is building Hebrew TTS and AI Agents.",
+]
+
+# Store facts once (only if not already in DB)
+try:
+    for fact in USER_FACTS:
+        memory.add(fact, user_id=USER_ID)
+    logger.info("User facts stored in memory")
+except Exception as e:
+    logger.warning(f"Could not store user facts: {e}")
+
+# Global conversation history
+conversation_history = []
+
+async def process_with_llm(transcript: str) -> AsyncGenerator[str, None]:
+    """Process transcript with LLM and yield streaming response"""
+    try:
+        # Save user input to memory
+        memory.add(transcript, user_id=USER_ID)
+        conversation_history.append(f"User: {transcript}")
+        
+        # Retrieve relevant memory
+        relevant = memory.search(transcript, user_id=USER_ID, limit=5)
+        memories_str = "\n".join(f"- {m}" for m in relevant)
+        
+        # Facts prompt
+        facts_prompt = "\n".join(f"- {fact}" for fact in USER_FACTS)
+        
+        # Include short-term conversation (last 5 turns)
+        short_term = "\n".join(conversation_history[-5:])
+        
+        system_context = f"""
+        You are Daniel's AI assistant with access to his memory.
+        Always give short, clear answers (1–2 sentences max).
+        
+        Facts about Daniel:
+        {facts_prompt}
+
+        Relevant Long-Term Memories:
+        {memories_str}
+
+        Recent Conversation:
+        {short_term}
+        """
+        
+        # Stream LLM response
+        full_response = ""
+        async for chunk in llm.astream([
+            {"role": "system", "content": system_context},
+            {"role": "user", "content": transcript}
+        ]):
+            if hasattr(chunk, 'content') and chunk.content:
+                full_response += chunk.content
+                yield chunk.content
+        
+        # Save response to memory and conversation history
+        if full_response.strip():
+            memory.add(full_response, user_id=USER_ID)
+            conversation_history.append(f"Assistant: {full_response}")
+            logger.info(f"LLM response saved: {full_response[:50]}...")
+            
+    except Exception as e:
+        logger.error(f"Error in LLM processing: {e}")
+        error_msg = "Sorry, I encountered an error processing your request."
+        yield error_msg
 
 async def transcribe(audio: tuple[int, np.ndarray]):
     sample_rate, audio_array = audio
@@ -68,7 +185,8 @@ async def transcribe(audio: tuple[int, np.ndarray]):
         },
         #return_timestamps="word"
     )
-    yield AdditionalOutputs(outputs["text"].strip())
+    transcript = outputs["text"].strip()
+    yield AdditionalOutputs(transcript)
 
 
 logger.info("Initializing FastRTC stream")
@@ -128,6 +246,9 @@ async def index():
     html_content = html_content.replace("__INJECTED_RTC_CONFIG__", json.dumps(rtc_configuration))
     return HTMLResponse(content=html_content)
 
+# Store LLM streams per webrtc_id
+llm_streams = {}
+
 @app.get("/transcript")
 def _(webrtc_id: str):
     logger.debug(f"New transcript stream request for webrtc_id: {webrtc_id}")
@@ -136,12 +257,38 @@ def _(webrtc_id: str):
             async for output in stream.output_stream(webrtc_id):
                 transcript = output.args[0]
                 logger.debug(f"Sending transcript for {webrtc_id}: {transcript[:50]}...")
+                
+                # Process with LLM and store the async generator
+                if transcript.strip():
+                    llm_streams[webrtc_id] = process_with_llm(transcript)
+                
                 yield f"event: output\ndata: {transcript}\n\n"
         except Exception as e:
             logger.error(f"Error in transcript stream for {webrtc_id}: {str(e)}")
             raise
 
     return StreamingResponse(output_stream(), media_type="text/event-stream")
+
+@app.get("/llm-response")
+def _(webrtc_id: str):
+    logger.debug(f"New LLM response stream request for webrtc_id: {webrtc_id}")
+    async def llm_output_stream():
+        try:
+            if webrtc_id in llm_streams:
+                llm_stream = llm_streams[webrtc_id]
+                async for chunk in llm_stream:
+                    logger.debug(f"Sending LLM chunk for {webrtc_id}: {chunk[:50]}...")
+                    yield f"event: llm-output\ndata: {chunk}\n\n"
+                
+                # Clean up after streaming is complete
+                del llm_streams[webrtc_id]
+            else:
+                logger.warning(f"No LLM stream found for webrtc_id: {webrtc_id}")
+        except Exception as e:
+            logger.error(f"Error in LLM response stream for {webrtc_id}: {str(e)}")
+            yield f"event: error\ndata: Error processing LLM response\n\n"
+
+    return StreamingResponse(llm_output_stream(), media_type="text/event-stream")
 
 
 if __name__ == "__main__":
