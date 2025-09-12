@@ -4,6 +4,7 @@ import json
 import asyncio
 import uuid
 from typing import AsyncGenerator
+import aiohttp
 
 import gradio as gr
 import numpy as np
@@ -41,6 +42,8 @@ MODEL_ID = os.getenv("MODEL_ID", "openai/whisper-large-v3-turbo")
 LANGUAGE = os.getenv("LANGUAGE", "english")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:20b")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+TTS_SERVER_URL = os.getenv("TTS_SERVER_URL", "http://localhost:8000/tts")
+TTS_LANGUAGE = os.getenv("TTS_LANGUAGE", "english")
 
 logger.info(f"""
     --------------------------------------
@@ -53,6 +56,8 @@ logger.info(f"""
     - LANGUAGE: {LANGUAGE}
     - OLLAMA_MODEL: {OLLAMA_MODEL}
     - OLLAMA_BASE_URL: {OLLAMA_BASE_URL}
+    - TTS_SERVER_URL: {TTS_SERVER_URL}
+    - TTS_LANGUAGE: {TTS_LANGUAGE}
     --------------------------------------
 """)
 
@@ -119,7 +124,27 @@ except Exception as e:
 # Global conversation history
 conversation_history = []
 
-async def process_with_llm(transcript: str) -> AsyncGenerator[str, None]:
+async def generate_tts_audio(text: str) -> bytes:
+    """Generate TTS audio from text using the TTS server"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            payload = {
+                "text": text,
+                "lang": TTS_LANGUAGE
+            }
+            async with session.post(TTS_SERVER_URL, json=payload) as response:
+                if response.status == 200:
+                    audio_data = await response.read()
+                    logger.info(f"Generated TTS audio for text: {text[:50]}...")
+                    return audio_data
+                else:
+                    logger.error(f"TTS server error: {response.status}")
+                    return None
+    except Exception as e:
+        logger.error(f"Error generating TTS: {e}")
+        return None
+
+async def process_with_llm(transcript: str, webrtc_id: str = None) -> AsyncGenerator[str, None]:
     """Process transcript with LLM and yield streaming response"""
     try:
         # Save user input to memory
@@ -165,6 +190,13 @@ async def process_with_llm(transcript: str) -> AsyncGenerator[str, None]:
             memory.add(full_response, user_id=USER_ID)
             conversation_history.append(f"Assistant: {full_response}")
             logger.info(f"LLM response saved: {full_response[:50]}...")
+            
+            # Generate TTS for the complete response
+            if webrtc_id:
+                tts_audio = await generate_tts_audio(full_response)
+                if tts_audio:
+                    tts_audio_store[webrtc_id] = tts_audio
+                    logger.info(f"TTS audio stored for webrtc_id: {webrtc_id}")
             
     except Exception as e:
         logger.error(f"Error in LLM processing: {e}")
@@ -246,8 +278,9 @@ async def index():
     html_content = html_content.replace("__INJECTED_RTC_CONFIG__", json.dumps(rtc_configuration))
     return HTMLResponse(content=html_content)
 
-# Store LLM streams per webrtc_id
+# Store LLM streams and TTS audio per webrtc_id
 llm_streams = {}
+tts_audio_store = {}
 
 @app.get("/transcript")
 def _(webrtc_id: str):
@@ -260,7 +293,7 @@ def _(webrtc_id: str):
                 
                 # Process with LLM and store the async generator
                 if transcript.strip():
-                    llm_streams[webrtc_id] = process_with_llm(transcript)
+                    llm_streams[webrtc_id] = process_with_llm(transcript, webrtc_id)
                 
                 yield f"event: output\ndata: {transcript}\n\n"
         except Exception as e:
@@ -291,6 +324,28 @@ def _(webrtc_id: str):
             yield f"event: error\ndata: Error processing LLM response\n\n"
 
     return StreamingResponse(llm_output_stream(), media_type="text/event-stream")
+
+@app.get("/tts-audio")
+def _(webrtc_id: str):
+    """Serve TTS audio for a specific webrtc_id"""
+    logger.debug(f"TTS audio request for webrtc_id: {webrtc_id}")
+    
+    if webrtc_id in tts_audio_store:
+        audio_data = tts_audio_store[webrtc_id]
+        # Clean up after serving
+        del tts_audio_store[webrtc_id]
+        
+        return StreamingResponse(
+            iter([audio_data]), 
+            media_type="audio/wav",
+            headers={
+                "Content-Disposition": f"inline; filename=tts_{webrtc_id}.wav",
+                "Cache-Control": "no-cache"
+            }
+        )
+    else:
+        logger.warning(f"No TTS audio found for webrtc_id: {webrtc_id}")
+        return HTMLResponse(content="No TTS audio available", status_code=404)
 
 
 if __name__ == "__main__":

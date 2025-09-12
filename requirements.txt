@@ -8,3 +8,4 @@ gradio
 uvicorn[standard]
 langchain-ollama
 chromadb
+aiohttp

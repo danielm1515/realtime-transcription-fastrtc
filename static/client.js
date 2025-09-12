@@ -9,6 +9,7 @@ document.addEventListener('DOMContentLoaded', function() {
     let isRecording = false; // Tracks whether we're currently recording or not
     let eventSource;         // Object that receives transcription results from the server
     let llmEventSource;      // Object that receives LLM responses from the server
+    let currentAudio;        // Current playing TTS audio
 
     // DOM element references
     const startButton = document.getElementById('start-button');    // The button to start/stop recording
@@ -23,6 +24,8 @@ document.addEventListener('DOMContentLoaded', function() {
     let currentParagraph = null;    // Reference to the current paragraph being updated
     let lastUpdateTime = Date.now(); // Timestamp of when we last updated the transcript
     let currentLLMParagraph = null;  // Reference to the current LLM response paragraph
+    let llmResponseComplete = false; // Flag to track if LLM response is complete
+    let ttsPlaybackTimer = null;     // Timer for TTS playback delay
 
     // Show error messages to the user in a toast notification
     function showError(message) {
@@ -360,6 +363,19 @@ document.addEventListener('DOMContentLoaded', function() {
             // Only process non-empty, non-undefined chunks
             if (event.data && event.data.trim() !== "" && event.data !== "undefined") {
                 appendLLMResponse(event.data);
+                
+                // Reset completion flag and timer when receiving new chunks
+                llmResponseComplete = false;
+                if (ttsPlaybackTimer) {
+                    clearTimeout(ttsPlaybackTimer);
+                }
+                
+                // Set a timer to detect when streaming stops (no new chunks for 2 seconds)
+                ttsPlaybackTimer = setTimeout(() => {
+                    console.log("LLM response appears complete, requesting TTS audio");
+                    llmResponseComplete = true;
+                    playTTSAudio();
+                }, 2000);
             }
         });
         
@@ -370,6 +386,69 @@ document.addEventListener('DOMContentLoaded', function() {
                 showError("LLM processing error: " + event.data);
             }
         });
+        
+        // Listen for when LLM response stream closes
+        llmEventSource.addEventListener("close", () => {
+            console.log("LLM response stream closed");
+            if (!llmResponseComplete) {
+                console.log("Stream closed, requesting TTS audio");
+                playTTSAudio();
+            }
+        });
+    }
+
+    // Play TTS audio response
+    async function playTTSAudio() {
+        if (!webrtc_id) {
+            console.warn("No webrtc_id available for TTS audio");
+            return;
+        }
+        
+        try {
+            console.log("Fetching TTS audio for webrtc_id:", webrtc_id);
+            
+            // Stop any currently playing audio
+            if (currentAudio && !currentAudio.paused) {
+                currentAudio.pause();
+                currentAudio.currentTime = 0;
+            }
+            
+            const response = await fetch(`/tts-audio?webrtc_id=${webrtc_id}`);
+            
+            if (response.ok) {
+                const audioBlob = await response.blob();
+                const audioUrl = URL.createObjectURL(audioBlob);
+                
+                currentAudio = new Audio(audioUrl);
+                currentAudio.volume = 0.8; // Set volume to 80%
+                
+                currentAudio.onloadeddata = () => {
+                    console.log("TTS audio loaded, playing...");
+                    currentAudio.play().catch(e => {
+                        console.error("Error playing TTS audio:", e);
+                        showError("Could not play TTS audio. Please check browser permissions.");
+                    });
+                };
+                
+                currentAudio.onended = () => {
+                    console.log("TTS audio playback finished");
+                    URL.revokeObjectURL(audioUrl); // Clean up
+                };
+                
+                currentAudio.onerror = (e) => {
+                    console.error("TTS audio error:", e);
+                    showError("Error playing TTS audio");
+                    URL.revokeObjectURL(audioUrl); // Clean up
+                };
+                
+            } else if (response.status === 404) {
+                console.log("No TTS audio available yet");
+            } else {
+                console.error("Error fetching TTS audio:", response.status);
+            }
+        } catch (error) {
+            console.error("Error in TTS audio playback:", error);
+        }
     }
 
     // Add LLM response to display
@@ -528,6 +607,18 @@ document.addEventListener('DOMContentLoaded', function() {
             llmEventSource = null;
         }
         
+        // Stop any playing TTS audio
+        if (currentAudio && !currentAudio.paused) {
+            currentAudio.pause();
+            currentAudio.currentTime = 0;
+        }
+        
+        // Clear TTS timer
+        if (ttsPlaybackTimer) {
+            clearTimeout(ttsPlaybackTimer);
+            ttsPlaybackTimer = null;
+        }
+        
         // Reset audio level
         audioLevel = 0;
         // Update button display
@@ -546,8 +637,9 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         }
         
-        // Reset LLM paragraph
+        // Reset LLM paragraph and completion flag
         currentLLMParagraph = null;
+        llmResponseComplete = false;
         
         // Reset timestamp
         lastUpdateTime = Date.now();
