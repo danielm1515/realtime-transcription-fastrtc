@@ -315,10 +315,16 @@ def _(webrtc_id: str):
                         logger.debug(f"Sending LLM chunk for {webrtc_id}: {chunk[:50]}...")
                         yield f"event: llm-output\ndata: {chunk}\n\n"
                 
+                # Send completion event before cleaning up
+                yield f"event: llm-complete\ndata: Stream complete\n\n"
+                
                 # Clean up after streaming is complete
                 del llm_streams[webrtc_id]
+                logger.info(f"LLM stream completed and cleaned up for {webrtc_id}")
             else:
-                logger.warning(f"No LLM stream found for webrtc_id: {webrtc_id}")
+                # Send a proper "no stream" event instead of just logging a warning
+                logger.debug(f"No LLM stream found for webrtc_id: {webrtc_id}")
+                yield f"event: no-stream\ndata: No stream available\n\n"
         except Exception as e:
             logger.error(f"Error in LLM response stream for {webrtc_id}: {str(e)}")
             yield f"event: error\ndata: Error processing LLM response\n\n"
@@ -334,6 +340,7 @@ def _(webrtc_id: str):
         audio_data = tts_audio_store[webrtc_id]
         # Clean up after serving
         del tts_audio_store[webrtc_id]
+        logger.info(f"TTS audio served and cleaned up for webrtc_id: {webrtc_id}")
         
         return StreamingResponse(
             iter([audio_data]), 
@@ -344,7 +351,7 @@ def _(webrtc_id: str):
             }
         )
     else:
-        logger.warning(f"No TTS audio found for webrtc_id: {webrtc_id}")
+        logger.debug(f"No TTS audio found for webrtc_id: {webrtc_id}")
         return HTMLResponse(content="No TTS audio available", status_code=404)
 
 

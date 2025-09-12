@@ -369,14 +369,28 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (ttsPlaybackTimer) {
                     clearTimeout(ttsPlaybackTimer);
                 }
-                
-                // Set a timer to detect when streaming stops (no new chunks for 2 seconds)
-                ttsPlaybackTimer = setTimeout(() => {
-                    console.log("LLM response appears complete, requesting TTS audio");
-                    llmResponseComplete = true;
-                    playTTSAudio();
-                }, 2000);
             }
+        });
+        
+        // Handle completion event from server
+        llmEventSource.addEventListener("llm-complete", (event) => {
+            console.log("LLM response complete, requesting TTS audio");
+            llmResponseComplete = true;
+            // Add small delay to ensure TTS audio is ready
+            setTimeout(() => {
+                playTTSAudio();
+            }, 500);
+            // Close the event source to stop polling
+            llmEventSource.close();
+            llmEventSource = null;
+        });
+        
+        // Handle no-stream event (when polling but no stream available)
+        llmEventSource.addEventListener("no-stream", (event) => {
+            console.log("No LLM stream available, closing connection");
+            // Close the event source to stop continuous polling
+            llmEventSource.close();
+            llmEventSource = null;
         });
         
         llmEventSource.addEventListener("error", (event) => {
@@ -384,15 +398,6 @@ document.addEventListener('DOMContentLoaded', function() {
             // Only show error if it's not undefined/empty
             if (event.data && event.data.trim() !== "" && event.data !== "undefined") {
                 showError("LLM processing error: " + event.data);
-            }
-        });
-        
-        // Listen for when LLM response stream closes
-        llmEventSource.addEventListener("close", () => {
-            console.log("LLM response stream closed");
-            if (!llmResponseComplete) {
-                console.log("Stream closed, requesting TTS audio");
-                playTTSAudio();
             }
         });
     }
