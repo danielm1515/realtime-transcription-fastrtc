@@ -12,6 +12,8 @@ document.addEventListener('DOMContentLoaded', function() {
     // DOM element references
     const startButton = document.getElementById('start-button');    // The button to start/stop recording
     const transcriptDiv = document.getElementById('transcript');    // The container for transcription text
+    const pulseButton = document.getElementById('pulse-button');    // The pulse button for recording
+    const pulseStatus = document.getElementById('pulse-status');    // Status text below pulse
 
     // Log debug info at start
     console.log('DOM loaded. startButton:', startButton, 'transcriptDiv:', transcriptDiv);
@@ -55,6 +57,10 @@ document.addEventListener('DOMContentLoaded', function() {
                     <span>Connecting...</span>
                 </div>
             `;
+            if (pulseStatus) {
+                pulseStatus.textContent = 'Connecting...';
+                pulseStatus.classList.remove('recording');
+            }
             isRecording = false;  // Not recording while connecting
         // If connected, show pulsing recording indicator
         } else if (peerConnection && peerConnection.connectionState === 'connected') {
@@ -64,10 +70,18 @@ document.addEventListener('DOMContentLoaded', function() {
                     <span>Stop Recording</span>
                 </div>
             `;
+            if (pulseStatus) {
+                pulseStatus.textContent = 'Recording... Click to stop';
+                pulseStatus.classList.add('recording');
+            }
             isRecording = true;   // Set recording state to true
         // Default state - ready to start
         } else {
             startButton.innerHTML = 'Start Recording';
+            if (pulseStatus) {
+                pulseStatus.textContent = 'Click to start recording';
+                pulseStatus.classList.remove('recording');
+            }
             isRecording = false;  // Not recording when not connected
         }
         console.log('Button state updated. isRecording:', isRecording);
@@ -106,10 +120,47 @@ document.addEventListener('DOMContentLoaded', function() {
             // Convert to 0-1 scale
             audioLevel = average / 255;
 
-            // Update pulse circle size based on audio level
-            const pulseCircle = document.querySelector('.pulse-circle');
-            if (pulseCircle) {
-                pulseCircle.style.setProperty('--audio-level', 1 + audioLevel);
+            // Update pulse and rings based on audio level
+            const pulse = document.querySelector('.pulse');
+            const pulseRings = document.querySelectorAll('.pulse-ring');
+            
+            if (pulse) {
+                // Simple scaling based on audio level (1.0 to 1.2)
+                const scale = 1 + (audioLevel * 0.2);
+                pulse.style.setProperty('--audio-level', scale);
+                
+                // Simple recording state - just add/remove recording class
+                if (audioLevel > 0.1) {
+                    pulse.classList.add('recording');
+                } else {
+                    pulse.classList.remove('recording');
+                }
+                
+                // Control color animation speed based on audio level
+                if (audioLevel > 0.3) {
+                    pulse.style.setProperty('--color-speed', '0.5s'); // Very fast when loud
+                } else if (audioLevel > 0.2) {
+                    pulse.style.setProperty('--color-speed', '1s');   // Fast when speaking
+                } else if (audioLevel > 0.1) {
+                    pulse.style.setProperty('--color-speed', '2s');   // Medium when quiet speech
+                } else {
+                    pulse.style.setProperty('--color-speed', '8s');   // Slow when idle
+                }
+            }
+            
+            // Simple ring animation based on audio level
+            if (pulseRings) {
+                pulseRings.forEach((ring, index) => {
+                    if (audioLevel > 0.1) {
+                        ring.classList.add('active');
+                        // Simple speed variation
+                        const speed = Math.max(1.5, 3 - audioLevel * 2);
+                        ring.style.animationDuration = `${speed}s`;
+                    } else {
+                        ring.classList.remove('active');
+                        ring.style.animationDuration = '3s';
+                    }
+                });
             }
 
             // Continue animation loop
@@ -435,8 +486,8 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 
     // Handle start/stop button clicks
-    startButton.addEventListener('click', () => {
-        console.log('Start button clicked. isRecording:', isRecording);
+    function handleRecordingToggle() {
+        console.log('Recording toggle clicked. isRecording:', isRecording);
         if (!isRecording) {
             // Start recording if not already recording
             setupWebRTC();
@@ -444,7 +495,14 @@ document.addEventListener('DOMContentLoaded', function() {
             // Stop recording if currently recording
             stop();
         }
-    });
+    }
+
+    startButton.addEventListener('click', handleRecordingToggle);
+    
+    // Also add click handler to pulse button
+    if (pulseButton) {
+        pulseButton.addEventListener('click', handleRecordingToggle);
+    }
 
     // Initialize UI when page loads
     console.log('Initializing UI...');
