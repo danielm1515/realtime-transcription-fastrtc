@@ -207,6 +207,27 @@ async def transcribe(audio: tuple[int, np.ndarray]):
     sample_rate, audio_array = audio
     logger.info(f"Sample rate: {sample_rate}Hz, Shape: {audio_array.shape}")
     
+    # Enhanced speech detection to avoid hallucinations
+    audio_float = audio_array.astype(np.float32)
+    
+    # Calculate multiple audio metrics for better speech detection
+    audio_rms = np.sqrt(np.mean(audio_float ** 2))
+    audio_max = np.max(np.abs(audio_float))
+    audio_std = np.std(audio_float)
+    
+    # Check for speech-like characteristics
+    # Real speech has higher energy variation and peaks
+    has_speech_energy = audio_rms > 0.005  # Lower threshold for quiet speech
+    has_speech_peaks = audio_max > 0.02    # Real speech has amplitude peaks
+    has_speech_variation = audio_std > 0.003  # Speech has variation, silence doesn't
+    
+    # Only skip if ALL indicators suggest no speech (very conservative)
+    if not (has_speech_energy or has_speech_peaks or has_speech_variation):
+        logger.debug(f"No speech detected - RMS: {audio_rms:.4f}, Max: {audio_max:.4f}, Std: {audio_std:.4f}")
+        return
+    
+    logger.debug(f"Speech detected - RMS: {audio_rms:.4f}, Max: {audio_max:.4f}, Std: {audio_std:.4f}")
+    
     outputs = transcribe_pipeline(
         audio_to_bytes(audio),
         chunk_length_s=5,
@@ -218,7 +239,19 @@ async def transcribe(audio: tuple[int, np.ndarray]):
         #return_timestamps="word"
     )
     transcript = outputs["text"].strip()
-    yield AdditionalOutputs(transcript)
+    
+    # Only filter if we're confident it's a hallucination AND audio was very quiet
+    # This way we don't filter real speech
+    if transcript and audio_rms < 0.003 and audio_max < 0.01:
+        # Only filter very common single-word hallucinations on very quiet audio
+        very_common_hallucinations = ["you", "thank you", "thanks"]
+        if transcript.lower().strip('.') in very_common_hallucinations:
+            logger.debug(f"Filtered likely hallucination on quiet audio: '{transcript}' (RMS: {audio_rms:.4f})")
+            return
+    
+    # Yield all other transcripts (including real "תודה רבה" when you actually speak)
+    if transcript and len(transcript.strip()) > 0:
+        yield AdditionalOutputs(transcript)
 
 
 logger.info("Initializing FastRTC stream")
