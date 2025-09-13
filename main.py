@@ -40,7 +40,7 @@ TURN_PROVIDER = os.getenv("TURN_PROVIDER", "hf-cloudflare") # hf-cloudflare | cl
 
 MODEL_ID = os.getenv("MODEL_ID", "openai/whisper-large-v3-turbo")
 LANGUAGE = os.getenv("LANGUAGE", "english")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:20b")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "aya:8b")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 TTS_SERVER_URL = os.getenv("TTS_SERVER_URL", "http://localhost:8000/tts")
 TTS_LANGUAGE = os.getenv("TTS_LANGUAGE", "english")
