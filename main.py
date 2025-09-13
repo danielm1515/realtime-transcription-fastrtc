@@ -227,27 +227,27 @@ stream = Stream(
         transcribe,
         algo_options=AlgoOptions(
             # Duration in seconds of audio chunks passed to the VAD model (default 0.6) 
-            audio_chunk_duration=0.5,
+            audio_chunk_duration=0.8,
             # If the chunk has more than started_talking_threshold seconds of speech, the user started talking (default 0.2)
-            started_talking_threshold=0.1,
+            started_talking_threshold=0.25,
             # If, after the user started speaking, there is a chunk with less than speech_threshold seconds of speech, the user stopped speaking. (default 0.1)
-            speech_threshold=0.1,
+            speech_threshold=0.03,
             # Max duration of speech chunks before the handler is triggered, even if a pause is not detected by the VAD model. (default -inf)
-            max_continuous_speech_s=15
+            max_continuous_speech_s=30
         ),
         model_options=SileroVadOptions(
             # Threshold for what is considered speech (default 0.5)
-            threshold=0.5,
+            threshold=0.3,
             # Final speech chunks shorter min_speech_duration_ms are thrown out (default 250)
-            min_speech_duration_ms=250,
+            min_speech_duration_ms=150,
             # Max duration of speech chunks, longer will be split at the timestamp of the last silence that lasts more than 100ms (if any) or just before max_speech_duration_s (default float('inf')) (used internally in the VAD algorithm to split the audio that's passed to the algorithm)
-            max_speech_duration_s=10,
+            max_speech_duration_s=25,
             # Wait for ms at the end of each speech chunk before separating it (default 2000)
-            min_silence_duration_ms=400,
+            min_silence_duration_ms=1500,
             # Chunk size for VAD model. Can be 512, 1024, 1536 for 16k s.r. (default 1024)
             window_size_samples=1024,
             # Final speech chunks are padded by speech_pad_ms each side (default 400)
-            speech_pad_ms=200,
+            speech_pad_ms=600,
         ),
     ),
     # send-receive: bidirectional streaming (default)
