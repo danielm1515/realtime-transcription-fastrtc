@@ -68,6 +68,8 @@ class LocalMemory:
     def __init__(self, persist_dir="memory_store"):
         self.client = chromadb.PersistentClient(path=persist_dir)
         self.collection = self.client.get_or_create_collection("long_term_memory")
+        self.conversation_collection = self.client.get_or_create_collection("conversation_history")
+        self.user_facts_collection = self.client.get_or_create_collection("user_facts")
 
     def add(self, text: str, user_id: str = "default"):
         doc_id = f"{user_id}_{uuid.uuid4()}"
@@ -85,6 +87,97 @@ class LocalMemory:
         )
         docs = results.get("documents", [])
         return [d for sublist in docs for d in sublist]  # flatten
+    
+    def save_conversation_turn(self, message: str, user_id: str = "default", turn_number: int = 0):
+        """Save a conversation turn to persistent storage"""
+        doc_id = f"{user_id}_turn_{turn_number}_{uuid.uuid4()}"
+        self.conversation_collection.add(
+            documents=[message],
+            metadatas={"user": user_id, "turn": turn_number, "timestamp": str(uuid.uuid4())},
+            ids=[doc_id]
+        )
+    
+    def load_conversation_history(self, user_id: str = "default", limit: int = 50):
+        """Load recent conversation history from persistent storage"""
+        try:
+            results = self.conversation_collection.query(
+                query_texts=["conversation"],
+                n_results=limit,
+                where={"user": user_id}
+            )
+            
+            if results and results.get("documents"):
+                # Get documents with metadata
+                docs = results["documents"][0] if results["documents"] else []
+                metadatas = results["metadatas"][0] if results.get("metadatas") else []
+                
+                # Sort by turn number if available
+                history_items = []
+                for i, doc in enumerate(docs):
+                    metadata = metadatas[i] if i < len(metadatas) else {}
+                    turn = metadata.get("turn", 0)
+                    history_items.append((turn, doc))
+                
+                # Sort by turn number and return messages
+                history_items.sort(key=lambda x: x[0])
+                return [item[1] for item in history_items[-limit:]]
+            
+            return []
+        except Exception as e:
+            logger.warning(f"Could not load conversation history: {e}")
+            return []
+    
+    def save_user_fact(self, fact: str, user_id: str = "default", fact_type: str = "general"):
+        """Save a new fact about the user"""
+        doc_id = f"{user_id}_fact_{uuid.uuid4()}"
+        self.user_facts_collection.add(
+            documents=[fact],
+            metadatas={"user": user_id, "fact_type": fact_type, "timestamp": str(uuid.uuid4())},
+            ids=[doc_id]
+        )
+        logger.info(f"Saved new user fact: {fact}")
+    
+    def get_user_facts(self, user_id: str = "default", limit: int = 20):
+        """Retrieve all known facts about the user"""
+        try:
+            results = self.user_facts_collection.query(
+                query_texts=["facts about user"],
+                n_results=limit,
+                where={"user": user_id}
+            )
+            
+            if results and results.get("documents"):
+                docs = results["documents"][0] if results["documents"] else []
+                return docs
+            
+            return []
+        except Exception as e:
+            logger.warning(f"Could not load user facts: {e}")
+            return []
+    
+    def update_user_fact(self, old_fact: str, new_fact: str, user_id: str = "default"):
+        """Update an existing fact about the user"""
+        try:
+            # First, try to find the old fact
+            results = self.user_facts_collection.query(
+                query_texts=[old_fact],
+                n_results=1,
+                where={"user": user_id}
+            )
+            
+            if results and results.get("ids") and results["ids"][0]:
+                # Delete the old fact
+                fact_id = results["ids"][0][0]
+                self.user_facts_collection.delete(ids=[fact_id])
+                logger.info(f"Deleted old fact: {old_fact}")
+            
+            # Add the new fact
+            self.save_user_fact(new_fact, user_id)
+            
+        except Exception as e:
+            logger.warning(f"Could not update user fact: {e}")
+            # Fallback: just add the new fact
+            self.save_user_fact(new_fact, user_id)
 
 # Initialize models and memory
 transcribe_pipeline = initialize_whisper_model(
@@ -105,24 +198,94 @@ llm = ChatOllama(
 USER_ID = "daniel"
 memory = LocalMemory()
 
-# Persistent user profile (facts)
-USER_FACTS = [
+# Initial user profile (facts) - will be stored in dynamic facts system
+INITIAL_USER_FACTS = [
     "The user's name is Daniel Mamre.",
     "Daniel is a senior full-stack engineer and ML enthusiast.",
     "He works on the TIBA SPARK ecosystem.",
     "He is building Hebrew TTS and AI Agents.",
 ]
 
-# Store facts once (only if not already in DB)
+# Store initial facts once (only if not already in DB)
 try:
-    for fact in USER_FACTS:
-        memory.add(fact, user_id=USER_ID)
-    logger.info("User facts stored in memory")
+    existing_facts = memory.get_user_facts(user_id=USER_ID)
+    if not existing_facts:  # Only add if no facts exist yet
+        for fact in INITIAL_USER_FACTS:
+            memory.save_user_fact(fact, user_id=USER_ID, fact_type="initial")
+        logger.info("Initial user facts stored in dynamic facts system")
+    else:
+        logger.info(f"Found {len(existing_facts)} existing user facts")
 except Exception as e:
-    logger.warning(f"Could not store user facts: {e}")
+    logger.warning(f"Could not store initial user facts: {e}")
 
-# Global conversation history
-conversation_history = []
+# Per-user conversation history storage
+user_conversation_histories = {}
+
+# Load existing conversation history from persistent storage
+try:
+    existing_history = memory.load_conversation_history(user_id=USER_ID, limit=20)
+    if existing_history:
+        user_conversation_histories[USER_ID] = existing_history
+        logger.info(f"Loaded {len(existing_history)} conversation turns from persistent storage")
+    else:
+        user_conversation_histories[USER_ID] = []
+        logger.info("No existing conversation history found, starting fresh")
+except Exception as e:
+    logger.warning(f"Could not load conversation history: {e}")
+    user_conversation_histories[USER_ID] = []
+
+# Global turn counter for conversation persistence
+conversation_turn_counter = len(user_conversation_histories.get(USER_ID, []))
+
+async def extract_new_facts(transcript: str, response: str, user_id: str = USER_ID) -> None:
+    """Extract and save new facts about the user from the conversation"""
+    try:
+        # Create a simple prompt to identify new facts
+        fact_extraction_prompt = f"""
+        Analyze this conversation and identify any NEW facts about the user that should be remembered.
+        Only extract clear, factual information that is NEW and not already known.
+        
+        User said: "{transcript}"
+        Assistant responded: "{response}"
+        
+        Current known facts about the user:
+        {chr(10).join(f"- {fact}" for fact in memory.get_user_facts(user_id=user_id, limit=10))}
+        
+        If there are any NEW facts to remember, list them one per line starting with "FACT:".
+        If no new facts, respond with "NO_NEW_FACTS".
+        
+        Examples of facts to remember:
+        - Personal preferences (favorite food, color, etc.)
+        - Current projects or work
+        - Technical skills or tools used
+        - Personal experiences mentioned
+        - Future plans or goals
+        - Family information
+        - Location or background info
+        
+        Only extract clear, factual statements. Don't extract opinions or temporary states.
+        """
+        
+        # Use LLM to extract facts
+        fact_response = ""
+        async for chunk in llm.astream([
+            {"role": "user", "content": fact_extraction_prompt}
+        ]):
+            if hasattr(chunk, 'content') and chunk.content:
+                fact_response += chunk.content
+        
+        # Parse the response and save new facts
+        if fact_response and "NO_NEW_FACTS" not in fact_response.upper():
+            lines = fact_response.strip().split('\n')
+            for line in lines:
+                if line.strip().startswith("FACT:"):
+                    new_fact = line.replace("FACT:", "").strip()
+                    if new_fact and len(new_fact) > 5:  # Basic validation
+                        memory.save_user_fact(new_fact, user_id=user_id, fact_type="learned")
+                        logger.info(f"Learned new fact about user: {new_fact}")
+        
+    except Exception as e:
+        logger.warning(f"Error extracting facts: {e}")
 
 async def generate_tts_audio(text: str) -> bytes:
     """Generate TTS audio from text using the TTS server"""
@@ -146,26 +309,51 @@ async def generate_tts_audio(text: str) -> bytes:
 
 async def process_with_llm(transcript: str, webrtc_id: str = None) -> AsyncGenerator[str, None]:
     """Process transcript with LLM and yield streaming response"""
+    global conversation_turn_counter
+    
     try:
-        # Save user input to memory
+        # Get or create conversation history for this user
+        if USER_ID not in user_conversation_histories:
+            user_conversation_histories[USER_ID] = []
+        
+        conversation_history = user_conversation_histories[USER_ID]
+        
+        # Save user input to memory and conversation history
         memory.add(transcript, user_id=USER_ID)
-        conversation_history.append(f"User: {transcript}")
+        user_message = f"User: {transcript}"
+        conversation_history.append(user_message)
+        
+        # Save user message to persistent storage
+        try:
+            memory.save_conversation_turn(user_message, user_id=USER_ID, turn_number=conversation_turn_counter)
+            conversation_turn_counter += 1
+        except Exception as e:
+            logger.warning(f"Could not save user message to persistent storage: {e}")
         
         # Retrieve relevant memory
         relevant = memory.search(transcript, user_id=USER_ID, limit=5)
         memories_str = "\n".join(f"- {m}" for m in relevant)
         
-        # Facts prompt
-        facts_prompt = "\n".join(f"- {fact}" for fact in USER_FACTS)
+        # Get current user facts (dynamic)
+        current_facts = memory.get_user_facts(user_id=USER_ID, limit=20)
+        facts_prompt = "\n".join(f"- {fact}" for fact in current_facts)
         
-        # Include short-term conversation (last 5 turns)
-        short_term = "\n".join(conversation_history[-5:])
+        # Include more conversation history (last 10 turns instead of 5)
+        short_term = "\n".join(conversation_history[-10:])
         
         system_context = f"""
         You are Daniel's AI assistant with access to his memory.
         Always give short, clear answers (1–2 sentences max).
         
-        Facts about Daniel:
+        IMPORTANT: If Daniel mentions new information about himself (preferences, projects, experiences, etc.), 
+        you should remember it for future conversations. Pay attention to facts like:
+        - Personal preferences or interests
+        - Current projects he's working on
+        - Technical skills or tools he uses
+        - Personal experiences or stories
+        - Future plans or goals
+        
+        Current Facts about Daniel:
         {facts_prompt}
 
         Relevant Long-Term Memories:
@@ -188,7 +376,26 @@ async def process_with_llm(transcript: str, webrtc_id: str = None) -> AsyncGener
         # Save response to memory and conversation history
         if full_response.strip():
             memory.add(full_response, user_id=USER_ID)
-            conversation_history.append(f"Assistant: {full_response}")
+            assistant_message = f"Assistant: {full_response}"
+            conversation_history.append(assistant_message)
+            
+            # Save assistant message to persistent storage
+            try:
+                memory.save_conversation_turn(assistant_message, user_id=USER_ID, turn_number=conversation_turn_counter)
+                conversation_turn_counter += 1
+            except Exception as e:
+                logger.warning(f"Could not save assistant message to persistent storage: {e}")
+            
+            # Extract new facts from this conversation turn
+            try:
+                await extract_new_facts(transcript, full_response, user_id=USER_ID)
+            except Exception as e:
+                logger.warning(f"Could not extract facts from conversation: {e}")
+            
+            # Keep conversation history manageable (last 50 messages)
+            if len(conversation_history) > 50:
+                user_conversation_histories[USER_ID] = conversation_history[-50:]
+            
             logger.info(f"LLM response saved: {full_response[:50]}...")
             
             # Generate TTS for the complete response
@@ -386,6 +593,36 @@ def _(webrtc_id: str):
     else:
         logger.debug(f"No TTS audio found for webrtc_id: {webrtc_id}")
         return HTMLResponse(content="No TTS audio available", status_code=404)
+
+@app.get("/user-facts")
+def get_user_facts():
+    """Get current facts about the user (for debugging)"""
+    try:
+        facts = memory.get_user_facts(user_id=USER_ID, limit=50)
+        return {
+            "user_id": USER_ID,
+            "facts_count": len(facts),
+            "facts": facts
+        }
+    except Exception as e:
+        logger.error(f"Error retrieving user facts: {e}")
+        return {"error": str(e)}, 500
+
+@app.post("/add-user-fact")
+def add_user_fact(fact_data: dict):
+    """Manually add a fact about the user"""
+    try:
+        fact = fact_data.get("fact", "").strip()
+        fact_type = fact_data.get("type", "manual")
+        
+        if not fact:
+            return {"error": "Fact text is required"}, 400
+        
+        memory.save_user_fact(fact, user_id=USER_ID, fact_type=fact_type)
+        return {"message": "Fact added successfully", "fact": fact}
+    except Exception as e:
+        logger.error(f"Error adding user fact: {e}")
+        return {"error": str(e)}, 500
 
 
 if __name__ == "__main__":
