@@ -10,6 +10,9 @@ document.addEventListener('DOMContentLoaded', function() {
     let eventSource;         // Object that receives transcription results from the server
     let llmEventSource;      // Object that receives LLM responses from the server
     let currentAudio;        // Current playing TTS audio
+    let isAIPlaying = false; // Track if AI is currently speaking
+    let interruptThreshold = 0.15; // Audio level threshold for interrupting AI (adjustable)
+    let interruptDetectionActive = false; // Flag to control interrupt detection
 
     // DOM element references
     const startButton = document.getElementById('start-button');    // The button to start/stop recording
@@ -26,6 +29,45 @@ document.addEventListener('DOMContentLoaded', function() {
     let currentLLMParagraph = null;  // Reference to the current LLM response paragraph
     let llmResponseComplete = false; // Flag to track if LLM response is complete
     let ttsPlaybackTimer = null;     // Timer for TTS playback delay
+
+    // Handle user interrupting AI speech
+    function handleUserInterrupt() {
+        if (!isAIPlaying || !currentAudio) return;
+        
+        console.log("User interrupted AI speech - stopping TTS");
+        
+        // Stop current TTS audio
+        if (currentAudio && !currentAudio.paused) {
+            currentAudio.pause();
+            currentAudio.currentTime = 0;
+        }
+        
+        // Update AI playing state
+        isAIPlaying = false;
+        
+        // Stop TTS visualization
+        stopTTSVisualization();
+        
+        // Show visual feedback that AI was interrupted
+        const pulse = document.querySelector('.pulse');
+        if (pulse) {
+            pulse.classList.add('interrupted');
+            setTimeout(() => {
+                pulse.classList.remove('interrupted');
+            }, 1000);
+        }
+        
+        // Optional: Show toast notification
+        const toast = document.getElementById('error-toast');
+        if (toast) {
+            toast.textContent = 'AI interrupted - listening...';
+            toast.className = 'toast info';
+            toast.style.display = 'block';
+            setTimeout(() => {
+                toast.style.display = 'none';
+            }, 2000);
+        }
+    }
 
     // Show error messages to the user in a toast notification
     function showError(message) {
@@ -124,6 +166,11 @@ document.addEventListener('DOMContentLoaded', function() {
             const average = Array.from(dataArray).reduce((a, b) => a + b, 0) / dataArray.length;
             // Convert to 0-1 scale
             audioLevel = average / 255;
+
+            // Check for user interrupt if AI is playing and interrupt detection is active
+            if (isAIPlaying && interruptDetectionActive && audioLevel > interruptThreshold) {
+                handleUserInterrupt();
+            }
 
             // Update pulse and rings based on audio level
             const pulse = document.querySelector('.pulse');
@@ -457,17 +504,23 @@ document.addEventListener('DOMContentLoaded', function() {
                 
                 currentAudio.onplay = () => {
                     console.log("TTS audio started playing");
+                    isAIPlaying = true;
+                    interruptDetectionActive = true; // Enable interrupt detection
                     startTTSVisualization();
                 };
                 
                 currentAudio.onended = () => {
                     console.log("TTS audio playback finished");
+                    isAIPlaying = false;
+                    interruptDetectionActive = false; // Disable interrupt detection
                     stopTTSVisualization();
                     URL.revokeObjectURL(audioUrl); // Clean up
                 };
                 
                 currentAudio.onerror = (e) => {
                     console.error("TTS audio error:", e);
+                    isAIPlaying = false;
+                    interruptDetectionActive = false; // Disable interrupt detection
                     stopTTSVisualization();
                     showError("Error playing TTS audio");
                     URL.revokeObjectURL(audioUrl); // Clean up
@@ -759,6 +812,10 @@ document.addEventListener('DOMContentLoaded', function() {
             currentAudio.pause();
             currentAudio.currentTime = 0;
         }
+        
+        // Reset AI playing state
+        isAIPlaying = false;
+        interruptDetectionActive = false;
         
         // Stop TTS visualization
         stopTTSVisualization();
